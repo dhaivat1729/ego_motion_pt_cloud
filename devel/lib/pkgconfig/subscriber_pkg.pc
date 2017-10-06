@@ -1,0 +1,8 @@
+prefix=/media/dhaivat1729/e4187b00-2f8d-4c09-b475-5966c6563009/Rockwell_collins_fast_stereo/computation_optimization_workspace/devel
+
+Name: subscriber_pkg
+Description: Description of subscriber_pkg
+Version: 0.0.0
+Cflags: 
+Libs: -L/media/dhaivat1729/e4187b00-2f8d-4c09-b475-5966c6563009/Rockwell_collins_fast_stereo/computation_optimization_workspace/devel/lib 
+Requires: 

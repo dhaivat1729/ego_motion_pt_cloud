@@ -1,0 +1,2 @@
+learning_tf2:subscriber_pkg
+-DCATKIN_DEVEL_PREFIX=/media/dhaivat1729/e4187b00-2f8d-4c09-b475-5966c6563009/Rockwell_collins_fast_stereo/computation_optimization_workspace/devel -DCMAKE_INSTALL_PREFIX=/media/dhaivat1729/e4187b00-2f8d-4c09-b475-5966c6563009/Rockwell_collins_fast_stereo/computation_optimization_workspace/install -G Unix Makefiles

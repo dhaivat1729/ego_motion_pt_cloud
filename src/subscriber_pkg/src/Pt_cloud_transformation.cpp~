@@ -1,0 +1,51 @@
+#include <ros/ros.h>
+#include <iostream>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/TransformStamped.h>
+#include <sensor_msgs/Image.h>
+#include <message_filters/subscriber.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <message_filters/time_synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
+#include <message_filters/sync_policies/exact_time.h>
+#include <tf/transform_listener.h>
+#include <sstream> // for ostringstream
+#include <string>
+
+using namespace sensor_msgs;
+using namespace message_filters;
+using namespace std;
+using namespace geometry_msgs;
+
+void cloud_callback (const sensor_msgs::PointCloud2ConstPtr& cloud_msg){
+
+     ROS_INFO("inside callback");     
+     tf::TransformListener listener;
+     tf::StampedTransform transform;
+     tf2_ros::Buffer tfBuffer;
+     tf2_ros::TransformListener tfListener(tfBuffer);
+     geometry_msgs::TransformStamped transformStamped;
+     ros::Time pt_cloud_ts = cloud_msg->header.stamp;  // Point  cloud timestamp
+     cout << pt_cloud_ts << endl;
+     /*listener.waitForTransform("/cam0", "/map", pt_cloud_ts, ros::Duration(3.0));
+     listener.lookupTransform("/cam0", "/map", pt_cloud_ts, transform); */
+     // What is the pose of camera0 at the time when cloud_msg was received with respect to current pose of camera0.
+     //listener.waitForTransform("/cam0", ros::Time(0), "/cam0", pt_cloud_ts, "/map", ros::Duration(10.0));
+     transformStamped = tfBuffer.lookupTransform("cam0", ros::Time(0), "cam0", pt_cloud_ts, "/map");
+     //cout << transform << endl;
+}
+
+int main(int argc, char** argv){
+	
+	// Initializing ROS_environment
+	ros::init(argc, argv, "Pt_cloud_transformation");
+	ros::NodeHandle node_obj;
+	//ros::Rate loop_rate(10);
+	ros::Subscriber sub;
+	cout << "Before callback!" << endl;
+        sub = node_obj.subscribe ("/pcl_xyzrgb", 10, cloud_callback);
+	cout << "After callback!" << endl;
+	ros::spin();
+	return 0;
+}
+

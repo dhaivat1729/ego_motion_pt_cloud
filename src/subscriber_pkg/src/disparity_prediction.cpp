@@ -1,0 +1,238 @@
+/*
+This code subscribes to raw images from left and right cameras and pose in a synchronized manner. 
+After receiving first set of raw images + pose, we compute disparity using standard SGBM. 
+Next, we keep getting left/right images and pose. we transform the initial disparity map into
+current frame and predict current disparity. We use this predicted disparity and new left/right images
+to refine the disparity map!	
+*/
+
+
+#include <ros/ros.h>
+#include <iostream>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/TransformStamped.h>
+#include <sensor_msgs/Image.h>
+#include <message_filters/subscriber.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <message_filters/time_synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
+#include <message_filters/sync_policies/exact_time.h>
+#include <tf/transform_listener.h>
+#include <sstream> // for ostringstream
+#include <message_filters/connection.h>
+#include <string>
+#include <pcl_ros/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl_ros/impl/transforms.hpp>
+#include <pcl/io/pcd_io.h>
+#include <unistd.h>
+#include <pcl/io/ply_io.h>
+#include <sensor_msgs/Image.h>
+#include <sensor_msgs/CameraInfo.h>
+#include <image_transport/image_transport.h>
+#include <cv_bridge/cv_bridge.h>
+#include <sensor_msgs/image_encodings.h>
+#include <opencv2/core/core.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/calib3d/calib3d.hpp>
+#include <opencv2/contrib/contrib.hpp>
+
+using namespace cv;
+using namespace sensor_msgs;
+using namespace message_filters;
+using namespace std;
+using namespace geometry_msgs;
+using namespace pcl;
+using namespace pcl_ros;
+using namespace tf2;
+
+// SlamDunk calibrated paramters
+float camera_matrix_l[3][3]={{432.08320937135778, 0, 337.54198488711262}, {0, 433.00345265051834, 247.31701986204351},{0, 0, 1}};  //Projection Matrix Ps3 camera
+//float distortion_coefficients_l[4][1]={{-0.329795791832902}, {0.171354481891701} ,{-0.062497174979430}, {0.0004983932270126202}, {0.000008364886208859099}};            //Camera Matrix o // Matlab paramters
+
+float distortion_coefficients_l[4][1]={{-0.0015355299072718684}, {0}, {0}, {0}};            //Camera Matrix o // From slamdunk calibration
+
+float camera_matrix_r[3][3]={{431.33413810692417, 0., 310.36762202912143}, {0, 431.80163244232176, 238.12093323431566}, {0, 0, 1}};  //Projection Matrix Ps3 camera
+//float distortion_coefficients_r[5][1]={{-0.326057790808347}, {0.159192356320030}, {-0.048466891556342}, {0.0003907877454749005},{-0.0001838990796207646}};            //Camera Matrix o // Matlab paramters
+
+float distortion_coefficients_r[4][1]={{0.00066376640137790193}, {0}, {0}, {0}};            //Camera Matrix o // From slamdunk calibration
+
+
+float relative_rotation[3][3]={ {0.999994225711118, -0.000363334208339934,
+       0.00337883599397535}, {0.000358761767974083,
+       0.999999019302383, 0.00135376669571662},
+       {-0.00337932455010961, -0.00135254668150175,
+       0.999993375369587}};
+
+float relative_translation[3][1] = {{-20.086131778527300},{-0.008257986510928},{-0.463644348932970}};
+
+float r1[3][3]={{0.99990407923595359, 0.0010767264667982538,
+       0.013808438992708470}, {-0.0010670306415240173,
+       0.99999917901684920, -0.00070951479016085478}, {-0.013809191609565872, 0.00069471270544324895,   0.99990440723168483}};
+
+float r2[3][3]={{0.99980495989032137, 0.00075826190965174985,
+       0.019734923804998708}, {-0.00077211889201979442,
+       0.99999946071952683, 0.00069454522682344498},
+       {-0.019734386515149627e-02, -0.00070964747014863573,
+       0.99980500618337498}};
+
+float p1[3][4]={ {351.98612023404002, 0, 315.66696919048394, 0}, {0.,
+       351.98612023404002, 243.61191598413927, 0}, {0, 0, 1, 0}};
+
+float p2[3][4]={{351.98612023404002, 0, 315.66696919048394, -70.715289735638265}, {0,
+       351.9861202340400, 243.61191598413927, 0}, 
+     	{0, 0, 1,0}};
+
+float q1[4][4] = {{0,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}};
+
+Size imageSize;
+
+Mat matrix_l = Mat(3, 3, CV_32FC1,  camera_matrix_l);
+Mat distortion_l = Mat(4, 1, CV_32FC1, distortion_coefficients_l);
+
+Mat matrix_r = Mat(3, 3, CV_32FC1,  camera_matrix_r);
+Mat distortion_r = Mat(4, 1, CV_32FC1, distortion_coefficients_r);
+
+Mat rel_rotation = Mat(3, 3, CV_32FC1, relative_rotation);
+Mat rel_translation = Mat(3, 3, CV_32FC1, relative_translation);
+
+
+Mat R1=Mat(3, 3, CV_32FC1,  r1);
+Mat P1=Mat(3, 4, CV_32FC1,  p1);
+Mat R2=Mat(3, 3, CV_32FC1,  r2);
+Mat P2=Mat(3, 4, CV_32FC1,  p2);
+Mat Q1=Mat(4, 4, CV_32FC1,  q1);
+Mat map1_l,map2_l,map1_r,map2_r;
+
+int alpha;
+
+Mat image,left_im,right_im,left_im_undist,right_im_undist,frame;
+Mat R_1, R_2, P_1, P_2, Q;
+
+Mat img_l = Mat::zeros(480, 640, 1);
+Mat original_disp; // The first disparity coming through SGBM will be stored here! 
+
+bool flag = true;
+double matching_time;	
+StereoSGBM *sbm;
+
+tf::Pose rp;  // root pose
+tf::Pose ip;  // instant pose
+tf::Pose net_transform;
+tf::Quaternion q; // rotation matrix
+tf::Vector3 v;  // translation matrix
+tf::Quaternion new_pose_q; // rotation matrix
+tf::Vector3 new_pose_v;  // translation matrix
+float rm[3][3]; // rotation matrix where quaternion of transformation will be stored in a 3x3 rotation matrix format
+
+void sync_callback(const ImageConstPtr& image_left, const ImageConstPtr& image_right, const geometry_msgs::PoseStamped::ConstPtr& msg){
+
+   cv_bridge::CvImagePtr cv_ptr_left;
+   cv_bridge::CvImagePtr cv_ptr_right;
+   cv_ptr_left = cv_bridge::toCvCopy(image_left, sensor_msgs::image_encodings::BGR8);
+   cv_ptr_right = cv_bridge::toCvCopy(image_right, sensor_msgs::image_encodings::BGR8);
+   //cout << "printing size of the image: " << "(" << cv_ptr_left->image.cols << ", " << cv_ptr_left->image.rows << ")" << endl; 
+   imageSize=img_l.size();
+   if(flag){	
+   matching_time = (double)getTickCount();
+   fisheye::initUndistortRectifyMap(matrix_l,distortion_l, R1,P1, imageSize, CV_16SC2, map1_l, map2_l); 
+   fisheye::initUndistortRectifyMap(matrix_r,distortion_r, R2,P2, imageSize, CV_16SC2, map1_r, map2_r);
+   remap(cv_ptr_left->image, left_im_undist, map1_l, map2_l, 2);
+   remap(cv_ptr_right->image, right_im_undist, map1_r, map2_r, 2);
+   int sadSize = 7;
+    
+	sbm->SADWindowSize = sadSize;
+	sbm->numberOfDisparities = 64;//144; 128
+	sbm->preFilterCap = 63; //63
+	sbm->minDisparity = -40; //-39; 0
+	sbm->uniquenessRatio = 7.0;
+	sbm->speckleWindowSize = 20;
+	sbm->speckleRange = 16;
+	sbm->disp12MaxDiff = 0;
+	sbm->fullDP = true;
+	sbm->P1 = 200; // sadSize*sadSize*4;
+	sbm->P2 = 1600; // sadSize*sadSize*32;	
+	sbm(left_im_undist, right_im_undist, original_disp);
+	Mat dispSGBMscale; 
+    	original_disp.convertTo(dispSGBMscale,CV_32F, 1./16);
+	
+   cout << "Saving rectified images!" << endl;
+   imwrite("./left_original.png", cv_ptr_left->image);	
+   imwrite("./right_original.png", cv_ptr_right->image);			
+   imwrite("./left_rectified.png", left_im_undist);	
+   imwrite("./right_rectified.png", right_im_undist);	
+   tf::poseMsgToTF(msg->pose, rp);
+   flag = false;
+
+   }
+   //cout << "Inside sync_callback!" << endl;
+   //cout << "( " << msg->pose.position.x << ", " << msg->pose.position.y << ", " << msg->pose.position.z << ")" << endl;
+   
+   //net_transform = rp.inverseTimes(ip); // Instant pose(ip) - root pose(rp)
+  
+}
+
+
+void pose_callback(const geometry_msgs::PoseStamped::ConstPtr& msg){
+
+   //cout << "Inside pose_callback!" << endl;
+   //cout << "( " << msg->pose.position.x << ", " << msg->pose.position.y << ", " << msg->pose.position.z << ")" << endl;
+   tf::poseMsgToTF(msg->pose, ip);
+   net_transform = ip.inverseTimes(rp); // Instant pose(ip) - root pose(rp)
+   q = net_transform.getRotation();
+   v = net_transform.getOrigin ();
+   tf::Quaternion q1(-0.7071, 0, 0, 0.7071); // theta = 90, theta/2 = 45 degrees (x,y,z,w), Around (-1,0,0) which is same as rotation around (1,0,0) by -90 degrees in clockwise
+   tf::Vector3 t1(0,0,0); // Translation is zero!
+   tf::Quaternion q2(0, 0, -0.7071, 0.7071); // Same as above!
+   tf::Vector3 t2(0,0,0);
+   tf::Transform tf1(q1, t1); // Around (1,0,0) by 90 degrees
+   tf::Transform tf2(q2, t2); // Around (0,0,1) by 90 degrees
+   //tf::Quaternion q3 = q2*q1;
+   /*
+    * Converting quaternion to rotation matrix
+    * Formula can be seen here! 
+    * http://fabiensanglard.net/doom3_documentation/37726-293748.pdf(Page 3)
+    */	
+   rm[0][0] = 1.0 - 2.0*q.y()*q.y() - 2.0*q.z()*q.z();
+   rm[0][1] = 2.0*q.x()*q.y() + 2.0*q.w()*q.z();
+   rm[0][2] = 2.0*q.x()*q.z() - 2.0*q.w()*q.y();
+   rm[1][0] = 2.0*q.x()*q.y() - 2.0*q.w()*q.z();
+   rm[1][1] = 1.0 - 2.0*q.x()*q.x() - 2.0*q.z()*q.z();
+   rm[1][2] = 2.0*q.y()*q.z() + 2.0*q.w()*q.x();
+   rm[2][0] = 2.0*q.x()*q.z() + 2.0*q.w()*q.y();
+   rm[2][1] = 2.0*q.y()*q.z() - 2.0*q.w()*q.x();
+   rm[2][2] = 1.0 - 2.0*q.x()*q.x() - 2.0*q.y()*q.y();
+   
+   //cout << "(" << q.w() << ", " << q.x() << ", " << q.y() << ", " << q.z() << ")" << endl;
+   //cout << "(" << v.x() << ", " << v.y() << ", " << v.z() << ")" << endl;
+
+}
+
+
+
+int main(int argc, char** argv){
+
+    ros::init(argc, argv, "SyncedPoseImages");
+
+    ros::NodeHandle node_object;
+
+    // Subscribing to right raw image
+    message_filters::Subscriber<Image> right_raw_sub(node_object, "/right_rgb/image", 1);
+
+    // Subscriber for left raw image
+    message_filters::Subscriber<Image> left_raw_sub(node_object, "/left_rgb/image", 1);
+
+    // Subscribing for new pose
+    message_filters::Subscriber<geometry_msgs::PoseStamped> Pose_new_sub(node_object, "/pose", 1);
+    typedef sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image, geometry_msgs::PoseStamped> MySyncPolicy2;
+    // ApproximateTime takes a queue size as its constructor argument, hence MySyncPolicy(10)
+    Synchronizer<MySyncPolicy2> sync2(MySyncPolicy2(10), left_raw_sub, right_raw_sub, Pose_new_sub);
+    sync2.registerCallback(boost::bind(&sync_callback, _1, _2, _3));
+    ros::Subscriber pose_subscriber = node_object.subscribe("/pose", 10, pose_callback);
+
+    //ros::Subscriber pose_subscriber = node_object.subscribe("/pose", 10, pose_callback);
+    ros::spin();
+    return 0;
+}
